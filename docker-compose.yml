@@ -1,0 +1,18 @@
+version: '3'
+services:
+  vcssync:
+    # docker run -ti --env-file vcssync.env -v ${PWD}/build:/build \
+    #  -v ${PWD}/mozharness:/mozharness vcssync_vcssync:latest \
+    #  python mozharness/scripts/vcs-sync/vcs_sync.py -c mozharness/configs/vcs_sync/debug-test.py
+    build:
+      context: ./
+      dockerfile: vcssync.dockerfile
+    env-file: vcssync.env
+    volumes:
+      - ./mozharness:/mozharness
+      - ./build:/build
+    working_dir: /
+    ports:
+      - "5000:5000"
+    command: python mozharness/scripts/vcs-sync/vcs_sync.py -c mozharness/configs/vcs_sync/debug-test.py
+
