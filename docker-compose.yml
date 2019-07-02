@@ -11,6 +11,8 @@ services:
     volumes:
       - ./mozharness:/mozharness
       - ./build:/build
+      - ./vcs_sync.py:/mozharness/scripts/vcs-sync/vcs_sync.py
+      - ./debug-test.py:/mozharness/configs/vcs_sync/debug-test.py
     working_dir: /
     ports:
       - "5000:5000"
