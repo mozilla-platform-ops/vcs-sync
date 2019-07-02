@@ -11,6 +11,7 @@ services:
     volumes:
       - ./mozharness:/mozharness
       - ./build:/build
+      - ./python.py:/mozharness/mozharness/base/python.py
       - ./vcs_sync.py:/mozharness/scripts/vcs-sync/vcs_sync.py
       - ./debug-test.py:/mozharness/configs/vcs_sync/debug-test.py
     working_dir: /
