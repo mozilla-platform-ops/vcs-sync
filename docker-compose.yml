@@ -10,7 +10,6 @@ services:
     env_file: vcssync.env
     volumes:
       - ./mozharness:/mozharness
-      - ./mozharness_deps:/mozharness_deps
       - ./build:/build
       - ./vcs_sync.py:/mozharness/scripts/vcs-sync/vcs_sync.py
       - ./debug-test.py:/mozharness/configs/vcs_sync/debug-test.py

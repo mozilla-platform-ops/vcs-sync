@@ -58,7 +58,6 @@ config = {
 
     "conversion_repos": conversion_repos,
     "remote_targets": remote_targets,
-    "virtualenv_cache_dir": "./mozharness_deps/",
     "virtualenv_modules": [
         "dulwich==0.9.0",
         "ordereddict==1.1",
@@ -96,8 +95,8 @@ config = {
 
     "default_actions": [
         #'list-repos',
-        #'create-virtualenv',
-        #'update-stage-mirror',
+        'create-virtualenv',
+        'update-stage-mirror',
         #'update-work-mirror',
         'publish-to-mapper',
         #'push',
