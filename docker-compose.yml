@@ -7,7 +7,7 @@ services:
     build:
       context: ./
       dockerfile: vcssync.dockerfile
-    env-file: vcssync.env
+    env_file: vcssync.env
     volumes:
       - ./mozharness:/mozharness
       - ./build:/build
