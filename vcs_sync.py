@@ -11,12 +11,18 @@ type conversions, as well as many-to-many (l10n, build repos, etc.)
 """
 
 from copy import deepcopy
+import base64
+import calendar
+import hashlib
+import hmac
+import math
 import mmap
 import os
 import pprint
 import re
 import sys
 import time
+import urlparse
 
 try:
     import simplejson as json
@@ -38,6 +44,175 @@ from mozharness.base.python import VirtualenvMixin, virtualenv_config_options
 from mozharness.base.transfer import TransferMixin
 from mozharness.base.vcs.vcssync import VCSSyncScript
 from mozharness.mozilla.tooltool import TooltoolMixin
+
+HAWK_VER = 1
+PY3 = sys.version_info[0] == 3
+
+if PY3:
+    six_binary_type = bytes
+else:
+    six_binary_type = str
+
+
+def utc_now(offset_in_seconds=0.0):
+    return int(math.floor(calendar.timegm(time.gmtime()) + float(offset_in_seconds)))
+
+
+def random_string(length):
+    return base64.urlsafe_b64encode(os.urandom(length))[:length]
+
+
+def parse_url(url):
+    url_parts = urlparse.urlparse(url)
+    url_dict = {
+        'scheme': url_parts.scheme,
+        'hostname': url_parts.hostname,
+        'port': url_parts.port,
+        'path': url_parts.path,
+        'resource': url_parts.path,
+        'query': url_parts.query,
+    }
+    if len(url_dict['query']) > 0:
+        url_dict['resource'] = '%s?%s' % (url_dict['resource'], url_dict['query'])
+    if url_parts.port is None:
+        if url_parts.scheme == 'http':
+            url_dict['port'] = 80
+        elif url_parts.scheme == 'https':
+            url_dict['port'] = 443
+    return url_dict
+
+
+def parse_content_type(content_type):  # pragma: no cover
+    if content_type:
+        return content_type.split(';')[0].strip().lower()
+    else:
+        return ''
+
+
+def calculate_payload_hash(algorithm, payload, content_type):
+    p_hash = hashlib.new(algorithm)
+    p_hash.update(''.join([
+        part if isinstance(part, six_binary_type) else part.encode('utf8')
+        for part in ['hawk.' + str(HAWK_VER) + '.payload\n',
+                     parse_content_type(content_type) + '\n',
+                     payload or '',
+                     '\n',
+                     ]
+    ]))
+    return base64.b64encode(p_hash.digest())
+
+
+def normalize_header_attr(val):
+    if isinstance(val, six_binary_type):
+        return val.decode('utf-8')
+    return val
+
+
+def normalize_string(mac_type,
+                     timestamp,
+                     nonce,
+                     method,
+                     name,
+                     host,
+                     port,
+                     content_hash,
+                     ):
+    return '\n'.join([
+        normalize_header_attr(header)
+        # The blank lines are important. They follow what the Node Hawk lib does.
+        for header in ['hawk.' + str(HAWK_VER) + '.' + mac_type,
+                       timestamp,
+                       nonce,
+                       method or '',
+                       name or '',
+                       host,
+                       port,
+                       content_hash or '',
+                       '',  # for ext which is empty in this case
+                       '',  # Add trailing new line.
+                       ]
+    ])
+
+
+def calculate_mac(mac_type,
+                  access_token,
+                  algorithm,
+                  timestamp,
+                  nonce,
+                  method,
+                  name,
+                  host,
+                  port,
+                  content_hash,
+                  ):
+    normalized = normalize_string(mac_type,
+                                  timestamp,
+                                  nonce,
+                                  method,
+                                  name,
+                                  host,
+                                  port,
+                                  content_hash)
+    digestmod = getattr(hashlib, algorithm)
+    if not isinstance(normalized, six_binary_type):
+        normalized = normalized.encode('utf8')
+    if not isinstance(access_token, six_binary_type):
+        access_token = access_token.encode('ascii')
+    result = hmac.new(access_token, normalized, digestmod)
+    return base64.b64encode(result.digest())
+
+
+class BadHeaderValue(Exception):
+    pass
+
+
+def prepare_header_val(val):
+    # Allowed request header characters:
+    # !#$%&'()*+,-./:;<=>?@[]^_`{|}~ and space, a-z, A-Z, 0-9, \, "
+    REQUEST_HEADER_ATTRIBUTE_CHARS = re.compile(
+        r"^[ a-zA-Z0-9_\!#\$%&'\(\)\*\+,\-\./\:;<\=>\?@\[\]\^`\{\|\}~]*$")
+    if isinstance(val, six_binary_type):
+        val = val.decode('utf-8')
+    if not REQUEST_HEADER_ATTRIBUTE_CHARS.match(val):
+        raise BadHeaderValue(
+            'header value value={val} contained an illegal character'.format(val=repr(val)))
+    return val
+
+
+def create_taskcluster_header(client_id,
+                              access_token,
+                              url,
+                              method,
+                              content_type,
+                              content = None,
+                              algorithm = 'sha256',
+                              ):
+    timestamp = str(utc_now())
+    nonce = random_string(6)
+    url_parts = parse_url(url)
+    content_hash = None
+    if content is not None:
+        content_hash = calculate_payload_hash(algorithm, content, content_type)
+    mac = calculate_mac('header',
+                        access_token,
+                        algorithm,
+                        timestamp,
+                        nonce,
+                        method,
+                        url_parts['resource'],
+                        url_parts['hostname'],
+                        str(url_parts['port']),
+                        content_hash,
+                        )
+    header = u'Hawk mac="{}"'.format(prepare_header_val(mac))
+    if content_hash:
+        header = u'{}, hash="{}"'.format(header, prepare_header_val(content_hash))
+    return u'{header}, id="{id}", ts="{ts}", nonce="{nonce}"'.format(
+        header=header,
+        id=prepare_header_val(client_id),
+        ts=prepare_header_val(timestamp),
+        nonce=prepare_header_val(nonce),
+    )
 
 
 # HgGitScript {{{1
@@ -983,10 +1158,7 @@ intree=1
                 mapper_url = mapper_config['url']
                 mapper_project = mapper_config['project']
                 insert_url = "%s/%s/insert/ignoredups" % (mapper_url, mapper_project)
-                headers = {
-                    'Content-Type': 'text/plain',
-                    'Authentication': 'Bearer %s' % os.environ["RELENGAPI_INSERT_HGGIT_MAPPINGS_AUTH_TOKEN"]
-                }
+
                 all_new_mappings = []
                 all_new_mappings.extend(self.pull_out_new_sha_lookups(published_to_mapper, complete_mapfile))
                 self.write_to_file(delta_for_mapper, "".join(all_new_mappings))
@@ -1032,12 +1204,43 @@ intree=1
                 if retcode != 1:
                     self.error("Bad selection of new mappings, some already there")
 
+                # create authentication headers
+                # For taskcluster auth, update the header for each request below
+                content_type = 'text/plain'
+                if 'RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_CLIENT_ID' in os.environ and \
+                    'RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_ACCESS_TOKEN' in os.environ:
+                    pass
+                else:
+                    authentication_header = 'Bearer %s' % os.environ["RELENGAPI_INSERT_HGGIT_MAPPINGS_AUTH_TOKEN"]
+                    headers = {
+                        'Content-Type': content_type,
+                        'Authentication': authentication_header,
+                    }
+
                 # due to timeouts on load balancer, we only push 200 lines at a time
                 # this means that we should get http response back within 30 seconds
                 # including the time it takes to insert the mappings in the database
                 publish_successful = True
+
                 for i in range(0, len(all_new_mappings), 200):
-                    r = requests.post(insert_url, data="".join(all_new_mappings[i:i+200]), headers=headers)
+                    data = "".join(all_new_mappings[i:i+200])
+
+                    if 'RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_CLIENT_ID' in os.environ and \
+                            'RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_ACCESS_TOKEN' in os.environ:
+                        authentication_header = create_taskcluster_header(
+                            client_id=os.environ['RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_CLIENT_ID'],
+                            access_token=os.environ['RELENGAPI_INSERT_HGGIT_MAPPINGS_TASKCLUSTER_ACCESS_TOKEN'],
+                            url=insert_url,
+                            method='POST',
+                            content_type=content_type,
+                            content=data,
+                        )
+                        headers = {
+                            'Content-Type': content_type,
+                            'Authentication': authentication_header,
+                        }
+
+                    r = requests.post(insert_url, data=data, headers=headers)
                     if (r.status_code != 200):
                         self.error("Could not publish mapfile ('%s') line range [%s, %s] to mapper (%s) - received http %s code" % (delta_for_mapper, i, i+200, insert_url, r.status_code))
                         publish_successful = False
@@ -1046,6 +1249,7 @@ intree=1
                         # time anyway
                     else:
                         self.info("Published mapfile ('%s') line range [%s, %s] to mapper (%s)" % (delta_for_mapper, i, i+200, insert_url))
+
                 if publish_successful:
                     # bug 1193011 says there are problems on occasion
                     # with delta uploads. Check that items are in db in
